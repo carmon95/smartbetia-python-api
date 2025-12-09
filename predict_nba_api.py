@@ -34,7 +34,7 @@ JOB_TOKEN = os.getenv("JOB_TOKEN", "cambia-este-token")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
-# Datos de la API de cuotas (por definir)
+# Datos de la API de cuotas (TheOddsAPI en tu caso)
 ODDS_API_URL = os.getenv("ODDS_API_URL")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
@@ -104,13 +104,28 @@ def insert_value_bet(row: dict):
 
 def fetch_real_odds():
     """
-    Llama a tu API de cuotas (ODDS_API_URL) para traer partidos y cuotas reales.
+    Llama a TheOddsAPI (ODDS_API_URL) para traer partidos y cuotas reales NBA Totals.
 
-    ⚠ IMPORTANTE:
-    Este es un ejemplo genérico. Cuando definamos qué API de cuotas vas a usar
-    (TheOddsAPI, OddsAPI, etc.), hay que adaptar:
-      - los parámetros del requests.get(...)
-      - y cómo se leen los campos del JSON de respuesta.
+    Estructura esperada de cada evento (simplificada):
+
+    {
+      "commence_time": "2025-12-09T23:10:00Z",
+      "home_team": "Orlando Magic",
+      "away_team": "Miami Heat",
+      "bookmakers": [
+        {
+          "markets": [
+            {
+              "key": "totals",
+              "outcomes": [
+                { "name": "Over", "price": 1.90, "point": 224.5 },
+                { "name": "Under", "price": 1.90, "point": 224.5 }
+              ]
+            }
+          ]
+        }
+      ]
+    }
     """
     if not ODDS_API_URL or not ODDS_API_KEY:
         # Devolvemos lista vacía para no romper el job si aún no configuras la API
@@ -119,7 +134,7 @@ def fetch_real_odds():
     resp = requests.get(
         ODDS_API_URL,
         params={
-            "apiKey": ODDS_API_KEY,
+            "apiKey": ODDS_API_KEY,   # TheOddsAPI usa apiKey así
             "regions": "us",
             "markets": "totals",
         },
@@ -145,7 +160,7 @@ async def job_update_value_bets(request: Request):
     """
     Endpoint que será llamado automáticamente (por ejemplo, desde un CRON en Supabase)
     para:
-      1) Obtener partidos y cuotas reales desde una API de cuotas externa.
+      1) Obtener partidos y cuotas reales desde TheOddsAPI.
       2) Calcular prob_over y edge usando tu modelo.
       3) Insertar value bets en la tabla value_bets de Supabase.
 
@@ -163,8 +178,6 @@ async def job_update_value_bets(request: Request):
             detail="SUPABASE_URL o SUPABASE_ANON_KEY no están configurados en el servidor",
         )
 
-    # Podemos permitir que el job se ejecute aunque aún no haya API de cuotas configurada,
-    # simplemente no insertará nada.
     odds_data = fetch_real_odds()
     if not odds_data:
         return {
@@ -176,39 +189,41 @@ async def job_update_value_bets(request: Request):
     inserted_count = 0
 
     for event in odds_data:
-        # ⚠️ Estructura EJEMPLO basada en algunas APIs típicas de odds.
-        # Luego debemos ajustar estos campos a la API REAL que elijas.
         home_team = event.get("home_team")
         away_team = event.get("away_team")
         kickoff_at = event.get("commence_time")  # ISO 8601
         sport = "NBA"
         league = "NBA"
 
-        # Tomar el primer bookmaker y el mercado "totals"
         bookmakers = event.get("bookmakers") or []
         if not bookmakers:
             continue
 
+        # Tomamos el primer bookmaker disponible
         bookmaker = bookmakers[0]
         markets = bookmaker.get("markets") or []
+
+        # Buscamos el mercado "totals"
         totals_market = next((m for m in markets if m.get("key") == "totals"), None)
         if not totals_market:
             continue
 
         outcomes = totals_market.get("outcomes") or []
-        over_outcome = next((o for o in outcomes if str(o.get("name", "")).lower().startswith("over")), None)
+
+        # En TheOddsAPI, Outcomes para totals tienen:
+        # { "name": "Over" / "Under", "price": 1.90, "point": 224.5 }
+        over_outcome = next(
+            (o for o in outcomes if str(o.get("name", "")).lower() == "over"),
+            None,
+        )
         if not over_outcome:
             continue
 
-        # Parsear la línea y la cuota del Over
-        # Ej: name = "Over 224.5", price = 1.90
         try:
-            name = str(over_outcome["name"])
-            parts = name.split()
-            closing_total_line = float(parts[1])
-            over_odds = float(over_outcome["price"])
+            closing_total_line = float(over_outcome["point"])   # línea total
+            over_odds = float(over_outcome["price"])            # cuota
         except Exception:
-            # Si algo raro viene en el formato, saltamos ese evento
+            # Si viene algo raro en el formato, saltamos este evento
             continue
 
         # 3) Calcular prob_over con TU modelo (misma lógica que en /predict-nba-over)
