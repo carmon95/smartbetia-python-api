@@ -187,8 +187,14 @@ async def job_update_value_bets(request: Request):
         }
 
     inserted_count = 0
+    total_events = 0
+    with_bookmakers = 0
+    with_totals = 0
+    with_over = 0
 
     for event in odds_data:
+        total_events += 1
+
         home_team = event.get("home_team")
         away_team = event.get("away_team")
         kickoff_at = event.get("commence_time")  # ISO 8601
@@ -198,6 +204,7 @@ async def job_update_value_bets(request: Request):
         bookmakers = event.get("bookmakers") or []
         if not bookmakers:
             continue
+        with_bookmakers += 1
 
         # Tomamos el primer bookmaker disponible
         bookmaker = bookmakers[0]
@@ -207,6 +214,7 @@ async def job_update_value_bets(request: Request):
         totals_market = next((m for m in markets if m.get("key") == "totals"), None)
         if not totals_market:
             continue
+        with_totals += 1
 
         outcomes = totals_market.get("outcomes") or []
 
@@ -218,6 +226,7 @@ async def job_update_value_bets(request: Request):
         )
         if not over_outcome:
             continue
+        with_over += 1
 
         try:
             closing_total_line = float(over_outcome["point"])   # línea total
@@ -231,15 +240,14 @@ async def job_update_value_bets(request: Request):
         X = [[closing_total_line, implied_over_prob]]
         prob_over = float(model.predict_proba(X)[0, 1])
 
-        # 4) Calcular edge
+        # 4) Calcular edge (solo informativo por ahora)
         edge = compute_edge(prob_over, over_odds)
 
-        # Filtramos solo value bets con edge >= MIN_EDGE
-        if edge < MIN_EDGE:
-            continue
+        # ⚠️ MODO DEBUG: NO filtramos por edge
+        # if edge < MIN_EDGE:
+        #     continue
 
         # 5) Armar fila para la tabla value_bets
-        #    Ajusta estos nombres según las columnas reales de tu migración.
         row = {
             "sport": sport,
             "league": league,
@@ -253,16 +261,15 @@ async def job_update_value_bets(request: Request):
             "is_active": True,
         }
 
-        # Insertar en Supabase
-        try:
-            insert_value_bet(row)
-            inserted_count += 1
-        except Exception as e:
-            # Si falla insertar un evento, continuamos con los demás
-            # (en logs de Render podrás ver el detalle)
-            print(f"Error insertando value_bet: {e}")
+        # ⚠️ MODO DEBUG: si hay error insertando, queremos que reviente
+        insert_value_bet(row)
+        inserted_count += 1
 
     return {
         "status": "ok",
         "inserted_count": inserted_count,
+        "total_events": total_events,
+        "with_bookmakers": with_bookmakers,
+        "with_totals": with_totals,
+        "with_over": with_over,
     }
