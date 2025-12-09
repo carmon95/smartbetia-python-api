@@ -98,7 +98,14 @@ def insert_value_bet(row: dict):
     }
 
     resp = requests.post(url, json=row, headers=headers, timeout=20)
-    resp.raise_for_status()
+
+    # Si Supabase devuelve error, queremos ver el detalle
+    if not resp.ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Supabase error {resp.status_code}: {resp.text}"
+        )
+
     return resp.json()
 
 
@@ -114,6 +121,7 @@ def fetch_real_odds():
       "away_team": "Miami Heat",
       "bookmakers": [
         {
+          "title": "Bet365",
           "markets": [
             {
               "key": "totals",
@@ -240,28 +248,37 @@ async def job_update_value_bets(request: Request):
         X = [[closing_total_line, implied_over_prob]]
         prob_over = float(model.predict_proba(X)[0, 1])
 
-        # 4) Calcular edge (solo informativo por ahora)
+        # 4) Calcular edge
         edge = compute_edge(prob_over, over_odds)
 
-        # ⚠️ MODO DEBUG: NO filtramos por edge
-        # if edge < MIN_EDGE:
-        #     continue
+        # Filtramos solo value bets con edge >= MIN_EDGE
+        if edge < MIN_EDGE:
+            continue
 
         # 5) Armar fila para la tabla value_bets
+        #    Columnas: id, sport, league, match, market, bookmaker,
+        #    odds, implied_probability, model_probability, edge,
+        #    risk_label, kickoff_at, is_active, created_at, updated_at,
+        #    total_line
+        match_str = f"{away_team} @ {home_team}" if home_team and away_team else None
+        implied_probability = 1.0 / over_odds
+
         row = {
             "sport": sport,
             "league": league,
-            "home_team": home_team,
-            "away_team": away_team,
+            "match": match_str,
             "market": "TOTAL_POINTS_OVER",
-            "closing_total_line": closing_total_line,
+            "bookmaker": bookmaker.get("title"),
             "odds": over_odds,
+            "implied_probability": implied_probability,
+            "model_probability": prob_over,
             "edge": edge,
+            "risk_label": "MEDIUM",
             "kickoff_at": kickoff_at,
             "is_active": True,
+            "total_line": closing_total_line,
         }
 
-        # ⚠️ MODO DEBUG: si hay error insertando, queremos que reviente
         insert_value_bet(row)
         inserted_count += 1
 
